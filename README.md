@@ -7,8 +7,6 @@
 ![Shell](https://img.shields.io/badge/Shell-Bash-4EAA25?logo=gnubash&logoColor=white)
 ![Sigstore](https://img.shields.io/badge/Sigstore-Cosign-2F74C0?logo=sigstore&logoColor=white)
 
-> A screenshot of a cloud console proves *"I once saw this."* A hashed, signed, immutably-stored Terraform capture proves **what** was deployed, **who** reviewed it, **when**, and that the artifact is **unchanged since**. This project builds the vault that holds that evidence and the pipeline that puts it there.
-
 ---
 
 ## The problem it solves
