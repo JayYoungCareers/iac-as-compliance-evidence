@@ -60,7 +60,10 @@ The capture script reads a Terraform workspace, hashes every file, tars them, an
 │           ├── variables.tf         #   project name, lock mode, retention days
 │           └── outputs.tf           #   vault_name (feeds the capture script)
 ├── scripts/
-│   └── capture-evidence.sh          # capture → hash → bundle → upload → receipt
+│   ├── capture-evidence.sh          # capture → hash → bundle → upload → receipt
+│   └── verify-evidence.sh           # fetch by VersionId → re-hash → verdict
+├── tests/
+│   └── test-verify-evidence.sh      # proves the verifier rejects tampering
 ├── evidence/
 │   └── lab-2-5/
 │       ├── receipt.json             # real run receipt (S3 VersionId recorded)
@@ -118,11 +121,70 @@ aws s3api delete-object --bucket "$VAULT" --key runs/test-001/bundle.tar.gz \
 
 Full walkthrough, verification checks, the optional Cosign step, and cleanup are in **[RUNBOOK.md](RUNBOOK.md)**.
 
+## Verifying evidence
+
+Capture proves an artifact went into the vault. **Verification proves what comes
+back out is the same bytes** — the other half of chain of custody, and the half
+an auditor actually exercises.
+
+```bash
+bash scripts/verify-evidence.sh \
+  --receipt evidence/lab-2-5/receipt.json \
+  --profile <your-aws-profile>
+```
+
+The verifier fetches the object *by `VersionId`* (never the mutable key), then
+runs an independent check per property and derives a verdict from the results —
+a check that never runs can never be silently counted as a pass:
+
+| Check | What it proves |
+| --- | --- |
+| `object_downloaded` | The pinned immutable version still exists in the vault |
+| `object_lock_retention` | WORM retention is **still in force** — a lapsed vault protects nothing |
+| `file:<name>` | Every manifest entry matches by SHA-256 **and** size |
+| `unlisted:<name>` | Nothing was *added* to the bundle — injection is tampering too |
+| `completeness:plan.json` / `state.json` | Warns when a capture ran without them, rather than passing a hollow bundle |
+| `signature` | Cosign bundle verifies against an expected identity and issuer |
+
+Output is a machine-readable verdict (`--json`) plus a non-zero exit code on
+failure, so it drops straight into a pipeline gate:
+
+```json
+{ "verdict": "VERIFIED", "run_id": "test-001",
+  "summary": { "passed": 11, "failed": 0, "warnings": 0 }, "checks": [ ... ] }
+```
+
+Signature verification is opt-in and deliberately refuses to run half-configured
+— `--signature` without `--identity` and `--issuer` is a usage error, because a
+signature verified against nobody in particular proves nothing:
+
+```bash
+bash scripts/verify-evidence.sh --receipt evidence/lab-2-5/receipt.json \
+  --signature evidence/lab-2-5/bundle.sig.bundle \
+  --identity '.*JayYoungCareers@users\.noreply\.github\.com' \
+  --issuer https://github.com/login/oauth
+```
+
+To verify a bundle you already hold, use `--bundle <path>` — the manifest checks
+run offline (the retention check is skipped, since there is no object to ask about).
+
+### Testing the verifier
+
+A verifier that has only ever seen valid input is an assumption, not a control.
+`tests/test-verify-evidence.sh` builds fixtures and asserts that an intact bundle
+verifies while altered, truncated, injected, and manifest-less bundles are all
+refused. It runs in CI on every push:
+
+```bash
+bash tests/test-verify-evidence.sh
+```
+
 ## Design decisions worth noting
 
 - **Object Lock is set at bucket creation, never retrofitted** — the code reflects the AWS constraint rather than hiding it, and the troubleshooting notes document why there is no upgrade path.
 - **GOVERNANCE by default, COMPLIANCE by choice** — labs need a bypass to clean up; real evidence must not be deletable by anyone, including root, until retention expires. The pattern is identical either way; only the variable changes.
 - **State never enters version control** — `terraform.tfstate` and downloaded provider binaries are git-ignored; the durable copy of evidence lives in the immutable vault, not the repo.
+- **The verifier derives its verdict from recorded checks, not from a running flag** — each check appends a structured result, so an aborted or skipped step surfaces as a missing pass instead of an accidental success.
 - **Everything downstream keys off the `VersionId`** — an evidence reference is `s3://<vault>/<key>?versionId=...`, which pins to one immutable object rather than a mutable path.
 
 ## Context
